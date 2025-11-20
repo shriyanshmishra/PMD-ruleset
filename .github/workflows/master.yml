@@ -96,14 +96,8 @@ jobs:
               echo "No PMD report generated (possibly no files to scan)."
           fi
 
-      - name: Install Salesforce CLI (sf)
-        run: |
-          wget https://developer.salesforce.com/media/salesforce-cli/sfdx-linux-amd64.tar.xz
-          mkdir sfdx
-          tar xJf sfdx-linux-amd64.tar.xz -C sfdx --strip-components 1
-          ./sfdx/install
-          export PATH=./sfdx/bin:$PATH
-          sf --version
+      - name: Install Salesforce CLI
+        uses: forcedotcom/cli-action@v1
 
       - name: Salesforce DX Full Build and Deployment
         env:
@@ -148,7 +142,7 @@ jobs:
           echo "Running Apex tests on scratch org..."
           sf force:apex:test:run --target-org $SCRATCH_ORG_ALIAS --result-format human --wait 10
 
-          # Uncomment below lines if you want to delete the scratch org after tests
+          # Uncomment below lines to delete the scratch org after tests and clean key
           # echo "Deleting scratch org..."
           # sf org delete scratch --target-org $SCRATCH_ORG_ALIAS -p || true
           # rm server.key
