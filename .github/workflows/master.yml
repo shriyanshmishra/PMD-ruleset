@@ -95,14 +95,7 @@ jobs:
           else
               echo "No PMD report generated (possibly no files to scan)."
           fi
-      - name: Install Salesforce CLI (sf)
-        run: |
-          wget https://developer.salesforce.com/media/salesforce-cli/sfdx-linux-amd64.tar.xz
-          mkdir sfdx
-          tar xJf sfdx-linux-amd64.tar.xz -C sfdx --strip-components 1
-          ./sfdx/install
-          export PATH=./sfdx/bin:$PATH
-          sf --version
+    
       - name: Salesforce DX Full Build and Deployment
         env:
           SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
