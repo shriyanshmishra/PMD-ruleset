@@ -1,0 +1,138 @@
+name: Salesforce DX CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - feature
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEVHUB_ALIAS: 'DevHub'
+      SCRATCH_ORG_ALIAS: 'scratch-org'
+      REPORT_FILE: 'pmd-report.csv'
+      RULESET: 'pmd-ruleset.xml'
+      PMD_VERSION: '7.0.0-rc4'
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v3
+        with:
+          ref: feature
+
+      - name: Install PMD
+        run: |
+          echo "Installing PMD..."
+          wget https://downloads.sourceforge.net/project/pmd/pmd/${PMD_VERSION}/pmd-dist-${PMD_VERSION}-bin.zip -O pmd.zip
+          unzip -q pmd.zip
+          rm pmd.zip
+          PMD_DIR=$(ls -d */ | grep pmd | head -n 1)
+          echo "Detected PMD directory: $PMD_DIR"
+          mv "$PMD_DIR" pmd
+          echo "Testing PMD installation..."
+          if [ -f "pmd/bin/run.sh" ]; then
+              chmod +x pmd/bin/run.sh
+              ./pmd/bin/run.sh pmd --version
+          elif [ -f "pmd/lib/pmd-cli-${PMD_VERSION}.jar" ]; then
+              java -cp "pmd/lib/*" net.sourceforge.pmd.cli.PmdCli --version
+          else
+              echo "ERROR: Could not find PMD entry point"
+              exit 1
+          fi
+
+      - name: Generate package.xml from changed files
+        run: |
+          git fetch origin main
+          git diff --name-only origin/main...HEAD > changed_files.txt
+          grep '^force-app/main/default/' changed_files.txt > filtered_changed_files.txt || true
+          mkdir -p manifest
+          node scripts/generate-package-xml.js filtered_changed_files.txt manifest/package.xml
+          echo "= Generated package.xml ="
+          cat manifest/package.xml
+        # Make sure the node environment is setup, you might need a setup-node step before
+
+      - name: Prepare Delta Scan Folder
+        run: |
+          rm -rf delta-scan
+          mkdir -p delta-scan
+          while read -r line; do
+            mkdir -p delta-scan/$(dirname "$line")
+            cp "$line" delta-scan/"$line"
+          done < filtered_changed_files.txt || true
+          echo "Delta scan folder contents:"
+          ls -lR delta-scan || true
+
+      - name: Run PMD Analysis
+        continue-on-error: true
+        run: |
+          echo "Running PMD analysis..."
+
+          if [ -f "pmd/bin/run.sh" ]; then
+              ./pmd/bin/run.sh pmd check \
+                  -d delta-scan \
+                  -R $RULESET \
+                  -f csv \
+                  -r $REPORT_FILE || true
+          else
+              java -cp "pmd/lib/*" net.sourceforge.pmd.cli.PmdCli check \
+                  -d delta-scan \
+                  -R $RULESET \
+                  -f csv \
+                  -r $REPORT_FILE || true
+          fi
+
+          echo "=== PMD Violations (CSV Output) ==="
+          if [ -f "$REPORT_FILE" ]; then
+              cat $REPORT_FILE
+          else
+              echo "No PMD report generated (possibly no files to scan)."
+          fi
+        # You can add upload-artifact action here if you want to save the report
+
+      - name: Salesforce DX Full Build and Deployment
+        env:
+          SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
+          SF_USERNAME: ${{ secrets.SF_USERNAME }}
+          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+        run: |
+          set -e
+
+          echo "$SF_JWT_KEY" > server.key
+          echo "Authenticating Dev Hub with JWT..."
+          sf org login jwt --client-id $SF_CLIENT_ID \
+              --jwt-key-file server.key \
+              --username $SF_USERNAME \
+              --set-default-dev-hub --alias $DEVHUB_ALIAS
+
+          echo "Cleaning local expired scratch org cache..."
+          sf org list --clean || true
+
+          echo "Retrieving active scratch org aliases..."
+          ORG_ALIASES=$(sf org list --clean --json | jq -r '.result.scratchOrgs[]?.alias')
+
+          if [ -z "$ORG_ALIASES" ]; then
+              echo "No active scratch orgs to delete."
+          else
+              for ORG_ALIAS in $ORG_ALIASES; do
+                  echo "Deleting scratch org: $ORG_ALIAS"
+                  sf org delete scratch --target-org $ORG_ALIAS -p || echo "Failed to delete $ORG_ALIAS"
+              done
+          fi
+
+          echo "Creating new scratch org..."
+          sf org create scratch -f config/project-scratch-def.json -a $SCRATCH_ORG_ALIAS \
+              -d --set-default --duration-days 1 --wait 10 --target-dev-hub $DEVHUB_ALIAS
+
+          echo "Validating deployment on scratch org (checkonly)..."
+          sf project deploy validate --manifest manifest/package.xml --target-org $SCRATCH_ORG_ALIAS --test-level RunLocalTests --wait 40
+
+          echo "Deploying source to scratch org..."
+          sf project deploy start --manifest manifest/package.xml --target-org $SCRATCH_ORG_ALIAS --test-level RunLocalTests --wait 40
+
+          echo "Running Apex tests on scratch org..."
+          sf force:apex:test:run --target-org $SCRATCH_ORG_ALIAS --result-format human --wait 10
+
+          # echo "Deleting scratch org..."
+          # sf org delete scratch --target-org $SCRATCH_ORG_ALIAS -p || true
+          # rm server.key
