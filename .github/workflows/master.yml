@@ -19,12 +19,16 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0      # Fetch full git history for diffs
+          fetch-depth: 0      # Full git history for diffs
           ref: feature
 
-      - name: Setup local branch tracking
-        run: git checkout -B feature origin/feature
+      # Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: npm install @salesforce/cli@2.81.9 --global
 
+      - name: Setup local branch tracking
+        run: |
+          git checkout -B feature origin/feature
       - name: Install PMD
         run: |
           echo "Installing PMD..."
@@ -44,7 +48,6 @@ jobs:
               echo "ERROR: Could not find PMD entry point"
               exit 1
           fi
-
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
@@ -59,7 +62,6 @@ jobs:
           node scripts/generate-package-xml.js filtered_changed_files.txt manifest/package.xml
           echo "= Generated package.xml ="
           cat manifest/package.xml
-
       - name: Prepare Delta Scan Folder
         run: |
           rm -rf delta-scan
@@ -70,7 +72,6 @@ jobs:
           done < filtered_changed_files.txt || true
           echo "Delta scan folder contents:"
           ls -lR delta-scan || true
-
       - name: Run PMD Analysis
         continue-on-error: true
         run: |
@@ -94,10 +95,14 @@ jobs:
           else
               echo "No PMD report generated (possibly no files to scan)."
           fi
-
-      - name: Install Salesforce CLI
-        uses: forcedotcom/sfdx-action@v1
-
+      - name: Install Salesforce CLI (sf)
+        run: |
+          wget https://developer.salesforce.com/media/salesforce-cli/sfdx-linux-amd64.tar.xz
+          mkdir sfdx
+          tar xJf sfdx-linux-amd64.tar.xz -C sfdx --strip-components 1
+          ./sfdx/install
+          export PATH=./sfdx/bin:$PATH
+          sf --version
       - name: Salesforce DX Full Build and Deployment
         env:
           SF_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
@@ -105,20 +110,16 @@ jobs:
           SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
         run: |
           set -e
-
           echo "$SF_JWT_KEY" > server.key
           echo "Authenticating Dev Hub with JWT..."
           sf org login jwt --client-id $SF_CLIENT_ID \
               --jwt-key-file server.key \
               --username $SF_USERNAME \
               --set-default-dev-hub --alias $DEVHUB_ALIAS
-
           echo "Cleaning local expired scratch org cache..."
           sf org list --clean || true
-
           echo "Retrieving active scratch org aliases..."
           ORG_ALIASES=$(sf org list --clean --json | jq -r '.result.scratchOrgs[]?.alias')
-
           if [ -z "$ORG_ALIASES" ]; then
               echo "No active scratch orgs to delete."
           else
@@ -127,21 +128,16 @@ jobs:
                   sf org delete scratch --target-org $ORG_ALIAS -p || echo "Failed to delete $ORG_ALIAS"
               done
           fi
-
           echo "Creating new scratch org..."
           sf org create scratch -f config/project-scratch-def.json -a $SCRATCH_ORG_ALIAS \
               -d --set-default --duration-days 1 --wait 10 --target-dev-hub $DEVHUB_ALIAS
-
           echo "Validating deployment on scratch org (checkonly)..."
           sf project deploy validate --manifest manifest/package.xml --target-org $SCRATCH_ORG_ALIAS --test-level RunLocalTests --wait 40
-
           echo "Deploying source to scratch org..."
           sf project deploy start --manifest manifest/package.xml --target-org $SCRATCH_ORG_ALIAS --test-level RunLocalTests --wait 40
-
           echo "Running Apex tests on scratch org..."
           sf force:apex:test:run --target-org $SCRATCH_ORG_ALIAS --result-format human --wait 10
-
-          # Uncomment below lines to delete the scratch org after tests and clean key
+          # Uncomment below lines if you want to delete the scratch org after tests
           # echo "Deleting scratch org..."
           # sf org delete scratch --target-org $SCRATCH_ORG_ALIAS -p || true
           # rm server.key
