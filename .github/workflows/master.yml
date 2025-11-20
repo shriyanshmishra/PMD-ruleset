@@ -19,12 +19,11 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0      # Full git history for diffs
+          fetch-depth: 0      # Fetch full git history for diffs
           ref: feature
 
       - name: Setup local branch tracking
-        run: |
-          git checkout -B feature origin/feature
+        run: git checkout -B feature origin/feature
 
       - name: Install PMD
         run: |
@@ -97,7 +96,7 @@ jobs:
           fi
 
       - name: Install Salesforce CLI
-        uses: forcedotcom/cli-action@v1
+        uses: forcedotcom/sfdx-action@v1
 
       - name: Salesforce DX Full Build and Deployment
         env:
